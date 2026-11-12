@@ -1,0 +1,11 @@
+=== LOG DO RECEPTOR RTP/UDP ===
+Data/Hora: Wed Nov 11 21:55:25 2026
+Porta: 2000
+Latencia: 50 ms
+Arquivo de audio salvo: audio_recebido.mp3
+Pacotes recebidos (pushed): 9824
+Pacotes perdidos (lost): 0
+Pacotes atrasados (late): 0
+Pacotes duplicados: 0
+Jitter medio: 58590 ns
+Status: Concluido com sucesso
