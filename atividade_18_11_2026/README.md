@@ -1,6 +1,6 @@
 # Atividade Prática - Streaming entre Dispositivos (18/11/2026)
 
-Aplicação de transmissão e recepção de áudio via RTP/UDP entre dois computadores na rede local com compensação de jitter, controle de latência e salvamento do fluxo em MP3.
+Aplicação de transmissão e reprodução de áudio ao vivo via RTP/UDP entre computadores na rede local com compensação de jitter e controle de latência. O som é decodificado e reproduzido diretamente no alto-falante em tempo real.
 
 ## Dependências
 
@@ -16,10 +16,10 @@ gcc streaming_audio.c -o streaming_audio $(pkg-config --cflags --libs gstreamer-
 
 ## Execução entre Dois Computadores
 
-### 1. Receptor (Dispositivo B - Iniciar primeiro)
-Descubra o IPv4 da máquina (`ip a` ou `hostname -I`).
+### 1. No Receptor (Dispositivo B - Iniciar primeiro)
+Descubra o IPv4 da interface de rede (`ip a` ou `hostname -I`).
 
-- **Via Argumento (recomendado para testes)**:
+- **Via Linha de Comando**:
   ```bash
   # Teste 1 (latência 50 ms):
   ./streaming_audio -r 5000 50
@@ -30,23 +30,38 @@ Descubra o IPv4 da máquina (`ip a` ou `hostname -I`).
 - **Via Modo Interativo**:
   ```bash
   ./streaming_audio
-  # Escolha: 2 -> Porta: 5000 -> Latencia (ms): 50 ou 200
+  # Escolha: 2 -> Porta: 5000 -> Latencia: 50 ou 200
   ```
-O receptor salva o áudio em `audio_recebido.mp3`, grava o log em `log_receptor_<latencia>ms.txt` e reproduz o som recebido ao final.
+O áudio toca no alto-falante em tempo real enquanto os pacotes chegam. Ao fim, o relatório com as estatísticas de jitter e perdas é gravado em `log_receptor_<latencia>ms.txt`.
 
 ---
 
-### 2. Transmissor (Dispositivo A)
-Informe o IP do Dispositivo B e a porta correspondente.
+### 2. No Transmissor (Dispositivo A)
+Informe o IP real do Dispositivo B e a mesma porta configurada:
 
-- **Via Argumento**:
+- **Via Linha de Comando**:
   ```bash
   ./streaming_audio -t <IP_DO_RECEPTOR> 5000 audio.mp3
-  # Exemplo: ./streaming_audio -t 192.168.1.15 5000 audio.mp3
+  # Exemplo: ./streaming_audio -t 192.168.10.2 5000 audio.mp3
   ```
 - **Via Modo Interativo**:
   ```bash
   ./streaming_audio
-  # Escolha: 1 -> IP do receptor: 192.168.1.15 -> Porta: 5000
+  # Escolha: 1 -> IP: <IP_DO_RECEPTOR> -> Porta: 5000
   ```
-O transmissor exibe o cronômetro do streaming em tempo real até a conclusão.
+
+---
+
+### Dicas para Transmissão entre Dispositivos Diferentes
+
+1. **Teste de Conectividade**: Antes de transmitir, teste no Dispositivo A se o Dispositivo B responde:
+   ```bash
+   ping <IP_DO_RECEPTOR>
+   ```
+2. **Firewall no Receptor**: Se os pacotes não chegarem, libere a porta UDP no Dispositivo B:
+   ```bash
+   sudo ufw allow 5000/udp
+   ```
+3. **Isolamento de Wi-Fi institucional (AP Isolation)**: Redes universitárias (como eduroam ou Wi-Fi institucional) costumam bloquear comunicação direta entre clientes. Se o ping falhar:
+   - Conecte as duas máquinas via **cabo Ethernet direto**, definindo IPs fixos (ex: `192.168.10.1` e `192.168.10.2`, máscara `255.255.255.0`).
+   - Ou roteie um **ponto de acesso Wi-Fi (hotspot)** a partir de um celular e conecte ambos os notebooks nele.

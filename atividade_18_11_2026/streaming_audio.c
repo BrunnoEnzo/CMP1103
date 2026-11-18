@@ -12,7 +12,6 @@
 
 // Definições padrão para arquivos e rede
 #define DEFAULT_ARQUIVO_ORIGEM "audio.mp3"
-#define DEFAULT_ARQUIVO_DESTINO "audio_recebido.mp3"
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORTA 5000
 #define DEFAULT_LATENCIA 200
@@ -217,26 +216,25 @@ int executar_transmissor(const char *ip, int port, const char *arquivo)
     return 0;
 }
 
-// Execução da função do receptor RTP/UDP
+// Execução da função do receptor RTP/UDP (streaming e reprodução direta em tempo real)
 int executar_receptor(int port, int latency)
 {
-    GstElement *pipeline, *src, *jitterbuffer, *depayloader, *convert, *resample, *encoder, *sink;
+    GstElement *pipeline, *src, *jitterbuffer, *depayloader, *convert, *resample, *sink;
     GstBus *bus;
     GstMessage *msg;
     GstStateChangeReturn ret;
     GstCaps *caps;
 
-    // Criação dos elementos da pipeline de recepção e gravação do áudio
+    // Criação dos elementos da pipeline de recepção e reprodução direta de áudio
     src = gst_element_factory_make("udpsrc", "udpsrc");
     jitterbuffer = gst_element_factory_make("rtpjitterbuffer", "jitterbuffer");
     depayloader = gst_element_factory_make("rtpL16depay", "depayloader");
     convert = gst_element_factory_make("audioconvert", "convert");
     resample = gst_element_factory_make("audioresample", "resample");
-    encoder = gst_element_factory_make("lamemp3enc", "encoder");
-    sink = gst_element_factory_make("filesink", "sink");
+    sink = criar_audio_sink();
     pipeline = gst_pipeline_new("pipeline-receptor");
 
-    if (!pipeline || !src || !jitterbuffer || !depayloader || !convert || !resample || !encoder || !sink)
+    if (!pipeline || !src || !jitterbuffer || !depayloader || !convert || !resample || !sink)
     {
         g_printerr("Erro: Falha ao criar elementos do receptor.\n");
         return -1;
@@ -248,12 +246,10 @@ int executar_receptor(int port, int latency)
     gst_caps_unref(caps);
 
     g_object_set(jitterbuffer, "latency", latency, "do-lost", TRUE, NULL);
-    g_object_set(encoder, "target", 1, "bitrate", 192, "cbr", TRUE, NULL);
-    g_object_set(sink, "location", DEFAULT_ARQUIVO_DESTINO, NULL);
 
-    // Montagem e conexão da pipeline
-    gst_bin_add_many(GST_BIN(pipeline), src, jitterbuffer, depayloader, convert, resample, encoder, sink, NULL);
-    if (gst_element_link_many(src, jitterbuffer, depayloader, convert, resample, encoder, sink, NULL) != TRUE)
+    // Montagem e conexão da pipeline para reprodução ao vivo
+    gst_bin_add_many(GST_BIN(pipeline), src, jitterbuffer, depayloader, convert, resample, sink, NULL);
+    if (gst_element_link_many(src, jitterbuffer, depayloader, convert, resample, sink, NULL) != TRUE)
     {
         g_printerr("Erro ao linkar elementos do receptor.\n");
         gst_object_unref(pipeline);
@@ -264,19 +260,19 @@ int executar_receptor(int port, int latency)
     g_rodando = TRUE;
     signal(SIGINT, sigint_handler);
 
-    // Início da recepção e gravação
+    // Início da recepção e reprodução sonora
     printf("Aguardando transmissao na porta %d (latencia: %d ms)...\n", port, latency);
     fflush(stdout);
 
     ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE)
     {
-        g_printerr("Erro ao iniciar pipeline do receptor.\n");
+        g_printerr("Erro ao iniciar reproducao do receptor.\n");
         gst_object_unref(pipeline);
         return -1;
     }
 
-    // Loop de monitoramento de pacotes e estatísticas durante o envio
+    // Loop de monitoramento de pacotes e estatísticas durante o streaming ao vivo
     bus = gst_element_get_bus(pipeline);
     gboolean recebendo = FALSE;
     guint64 pushed = 0, lost = 0, late = 0, duplicates = 0, jitter = 0;
@@ -303,7 +299,7 @@ int executar_receptor(int port, int latency)
             if (!recebendo)
             {
                 recebendo = TRUE;
-                printf("Recebendo dados e salvando em %s...\n", DEFAULT_ARQUIVO_DESTINO);
+                printf("Recebendo e reproduzindo audio em tempo real...\n");
             }
             printf("\rPacotes recebidos: %lu | Perdidos: %lu | Atrasados: %lu | Jitter: %lu ns",
                    (unsigned long)pushed, (unsigned long)lost, (unsigned long)late, (unsigned long)jitter);
@@ -341,13 +337,7 @@ int executar_receptor(int port, int latency)
         }
     }
 
-    printf("\nEnvio concluido. Arquivo salvo com sucesso.\n");
-
-    // Descarrega o encoder com EOS para garantir a gravacao completa do arquivo MP3
-    gst_element_send_event(pipeline, gst_event_new_eos());
-    GstMessage *eos_msg = gst_bus_timed_pop_filtered(bus, 1 * GST_SECOND, GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
-    if (eos_msg)
-        gst_message_unref(eos_msg);
+    printf("\nTransmissao concluida.\n");
 
     // Liberação da pipeline de recepção
     gst_object_unref(bus);
@@ -370,7 +360,7 @@ int executar_receptor(int port, int latency)
             fprintf(log, "Data/Hora: %s", ctime(&agora));
             fprintf(log, "Porta: %d\n", port);
             fprintf(log, "Configuracao de Latencia (rtpjitterbuffer): %d ms\n", latency);
-            fprintf(log, "Arquivo de audio recebido: %s\n", DEFAULT_ARQUIVO_DESTINO);
+            fprintf(log, "Modo de reproducao: Streaming em tempo real no alto-falante\n");
             fprintf(log, "Pacotes recebidos (num-pushed): %lu\n", (unsigned long)pushed);
             fprintf(log, "Pacotes perdidos (num-lost): %lu\n", (unsigned long)lost);
             fprintf(log, "Pacotes atrasados (num-late): %lu\n", (unsigned long)late);
@@ -382,39 +372,6 @@ int executar_receptor(int port, int latency)
     }
 
     printf("Relatorio salvo em %s\n", nome_log);
-
-    // Reprodução do áudio gravado ao final da transmissão
-    if (pushed > 0 && access(DEFAULT_ARQUIVO_DESTINO, F_OK) == 0)
-    {
-        printf("Reproduzindo audio salvo...\n");
-        fflush(stdout);
-
-        GstElement *player = gst_element_factory_make("playbin", "player");
-        GstElement *audio_sink = criar_audio_sink();
-        gchar *uri = gst_filename_to_uri(DEFAULT_ARQUIVO_DESTINO, NULL);
-
-        if (player && uri)
-        {
-            g_object_set(player, "uri", uri, "audio-sink", audio_sink, NULL);
-            g_free(uri);
-
-            gst_element_set_state(player, GST_STATE_PLAYING);
-            GstBus *play_bus = gst_element_get_bus(player);
-            GstMessage *play_msg = gst_bus_timed_pop_filtered(play_bus, GST_CLOCK_TIME_NONE,
-                                                             GST_MESSAGE_ERROR | GST_MESSAGE_EOS);
-
-            if (play_msg != NULL)
-            {
-                gst_message_unref(play_msg);
-            }
-
-            gst_object_unref(play_bus);
-            gst_element_set_state(player, GST_STATE_NULL);
-            gst_object_unref(player);
-        }
-    }
-
-    printf("Reproducao concluida.\n");
     return 0;
 }
 
