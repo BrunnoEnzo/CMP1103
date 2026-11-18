@@ -1,0 +1,11 @@
+=== RELATORIO DE STREAMING RTP/UDP ===
+Data/Hora: Wed Nov 18 20:18:54 2026
+Porta: 5002
+Configuracao de Latencia (rtpjitterbuffer): 200 ms
+Arquivo de audio recebido: audio_recebido.mp3
+Pacotes recebidos (num-pushed): 772
+Pacotes perdidos (num-lost): 0
+Pacotes atrasados (num-late): 0
+Pacotes duplicados: 0
+Jitter medio calculado: 30350 ns
+Status da transmissao: Concluido com sucesso
