@@ -5,6 +5,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -201,9 +205,12 @@ int executar_transmissor(const char *ip, int port, const char *arquivo)
             if (gst_element_query_position(data.pipeline, GST_FORMAT_TIME, &pos) &&
                 gst_element_query_duration(data.pipeline, GST_FORMAT_TIME, &dur) && dur > 0)
             {
-                printf("\rTransmitindo: %02ld:%02ld / %02ld:%02ld",
-                       (long)((pos / GST_SECOND) / 60), (long)((pos / GST_SECOND) % 60),
-                       (long)((dur / GST_SECOND) / 60), (long)((dur / GST_SECOND) % 60));
+                double frac = (double)pos / (double)dur;
+                if (frac > 1.0) frac = 1.0;
+                long bytes_enviados = (long)(frac * fsize);
+                printf("\rTransmitindo: %.2f MB / %.2f MB",
+                       (double)bytes_enviados / (1024.0 * 1024.0),
+                       (double)fsize / (1024.0 * 1024.0));
                 fflush(stdout);
             }
         }
@@ -214,6 +221,31 @@ int executar_transmissor(const char *ip, int port, const char *arquivo)
     gst_element_set_state(data.pipeline, GST_STATE_NULL);
     gst_object_unref(data.pipeline);
     return 0;
+}
+
+// Exibe os endereços IPv4 das interfaces ativas do dispositivo receptor
+static void exibir_ips_locais(void)
+{
+    struct ifaddrs *ifap, *ifa;
+    if (getifaddrs(&ifap) == 0)
+    {
+        for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next)
+        {
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
+            {
+                if (ifa->ifa_flags & IFF_LOOPBACK)
+                    continue;
+                if (strncmp(ifa->ifa_name, "docker", 6) == 0 || strncmp(ifa->ifa_name, "br-", 3) == 0)
+                    continue;
+
+                struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(sa->sin_addr), ip, INET_ADDRSTRLEN);
+                printf("IP deste receptor: %s (interface: %s)\n", ip, ifa->ifa_name);
+            }
+        }
+        freeifaddrs(ifap);
+    }
 }
 
 // Execução da função do receptor RTP/UDP (streaming e reprodução direta em tempo real)
@@ -261,6 +293,7 @@ int executar_receptor(int port, int latency)
     signal(SIGINT, sigint_handler);
 
     // Início da recepção e reprodução sonora
+    exibir_ips_locais();
     printf("Aguardando transmissao na porta %d (latencia: %d ms)...\n", port, latency);
     fflush(stdout);
 
