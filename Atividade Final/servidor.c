@@ -8,25 +8,32 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-// Estrutura com os componentes e estado da aplicação Servidor (Transmissor)
+#define DEFAULT_ARQUIVO "audio.mp3"
+#define DEFAULT_IP "127.0.0.1"
+#define DEFAULT_PORTA 5000
+
+// Estrutura principal da aplicação Servidor (Transmissor de Áudio)
 typedef struct {
     GtkWidget *window;
     GtkWidget *entry_ip;
     GtkWidget *spin_porta;
-    GtkWidget *combo_resolucao;
-    GtkWidget *combo_fps;
-    GtkWidget *combo_bitrate;
-    GtkWidget *combo_preset;
-    GtkWidget *combo_padrao;
+    GtkWidget *entry_arquivo;
+    GtkWidget *btn_arquivo;
+    GtkWidget *combo_amostragem;
+    GtkWidget *combo_canais;
     GtkWidget *btn_iniciar;
     GtkWidget *btn_interromper;
+    GtkWidget *progress_bar;
     GtkWidget *lbl_status;
     GtkWidget *lbl_ip_local;
 
     GstElement *pipeline;
+    GstElement *audio_convert;
     guint bus_watch_id;
+    guint timer_id;
     gboolean transmitindo;
-} ServidorApp;
+    long tamanho_arquivo;
+} ServidorAudioApp;
 
 // Detecta e retorna os endereços IPv4 das interfaces ativas do dispositivo
 static gchar *obter_ips_locais(void) {
@@ -52,11 +59,47 @@ static gchar *obter_ips_locais(void) {
     return g_string_free(str, FALSE);
 }
 
-// Interrompe a pipeline e restaura o estado dos botões
+// Conexão dinâmica do pad decodificado do uridecodebin
+static void pad_added_handler(GstElement *src, GstPad *new_pad, ServidorAudioApp *app) {
+    (void)src;
+    GstPad *sink_pad = gst_element_get_static_pad(app->audio_convert, "sink");
+    if (!sink_pad) return;
+
+    if (gst_pad_is_linked(sink_pad)) {
+        gst_object_unref(sink_pad);
+        return;
+    }
+
+    GstCaps *new_pad_caps = gst_pad_get_current_caps(new_pad);
+    if (!new_pad_caps) {
+        new_pad_caps = gst_pad_query_caps(new_pad, NULL);
+    }
+
+    if (new_pad_caps) {
+        GstStructure *new_pad_struct = gst_caps_get_structure(new_pad_caps, 0);
+        const gchar *new_pad_type = gst_structure_get_name(new_pad_struct);
+
+        if (g_str_has_prefix(new_pad_type, "audio/x-raw")) {
+            GstPadLinkReturn ret = gst_pad_link(new_pad, sink_pad);
+            if (GST_PAD_LINK_FAILED(ret)) {
+                g_printerr("Falha ao vincular pad de áudio do transmissor.\n");
+            }
+        }
+        gst_caps_unref(new_pad_caps);
+    }
+    gst_object_unref(sink_pad);
+}
+
+// Interrompe a transmissão e restaura a interface
 static void interromper_transmissao(GtkButton *btn, gpointer user_data) {
     (void)btn;
-    ServidorApp *app = (ServidorApp *)user_data;
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
     if (!app->transmitindo && !app->pipeline) return;
+
+    if (app->timer_id > 0) {
+        g_source_remove(app->timer_id);
+        app->timer_id = 0;
+    }
 
     if (app->bus_watch_id > 0) {
         g_source_remove(app->bus_watch_id);
@@ -67,6 +110,7 @@ static void interromper_transmissao(GtkButton *btn, gpointer user_data) {
         gst_element_set_state(app->pipeline, GST_STATE_NULL);
         gst_object_unref(app->pipeline);
         app->pipeline = NULL;
+        app->audio_convert = NULL;
     }
 
     app->transmitindo = FALSE;
@@ -75,17 +119,41 @@ static void interromper_transmissao(GtkButton *btn, gpointer user_data) {
     gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#555555'>Status: <b>Parado</b></span>");
 }
 
-// Callback assíncrono do GstBus para tratamento de mensagens no loop principal da GLib
+// Atualização periódica do progresso da transmissão em MB
+static gboolean atualizar_progresso(gpointer user_data) {
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
+    if (!app->transmitindo || !app->pipeline) return FALSE;
+
+    gint64 pos = 0, dur = 0;
+    if (gst_element_query_position(app->pipeline, GST_FORMAT_TIME, &pos) &&
+        gst_element_query_duration(app->pipeline, GST_FORMAT_TIME, &dur) && dur > 0) {
+        double frac = (double)pos / (double)dur;
+        if (frac > 1.0) frac = 1.0;
+        if (frac < 0.0) frac = 0.0;
+
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(app->progress_bar), frac);
+
+        double mb_total = (double)app->tamanho_arquivo / (1024.0 * 1024.0);
+        double mb_enviados = frac * mb_total;
+
+        gchar *texto_barra = g_strdup_printf("%.2f MB / %.2f MB (%d%%)", mb_enviados, mb_total, (int)(frac * 100));
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(app->progress_bar), texto_barra);
+        g_free(texto_barra);
+    }
+    return TRUE;
+}
+
+// Callback assíncrono do GstBus
 static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer user_data) {
     (void)bus;
-    ServidorApp *app = (ServidorApp *)user_data;
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
 
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_ERROR: {
             GError *err = NULL;
             gchar *debug = NULL;
             gst_message_parse_error(msg, &err, &debug);
-            g_printerr("Erro na pipeline do transmissor: %s\n", err->message);
+            g_printerr("Erro na transmissão de áudio: %s\n", err->message);
             gchar *msg_err = g_strdup_printf("<span foreground='#c62828'><b>Erro: %s</b></span>", err->message);
             gtk_label_set_markup(GTK_LABEL(app->lbl_status), msg_err);
             g_free(msg_err);
@@ -95,97 +163,108 @@ static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer user_data) {
             break;
         }
         case GST_MESSAGE_EOS:
-            gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#555555'>Status: <b>Fim do fluxo (EOS)</b></span>");
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(app->progress_bar), 1.0);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(app->progress_bar), "100% Concluído");
+            gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#2e7d32'>Status: <b>Transmissão de áudio concluída com sucesso (EOS)</b></span>");
             interromper_transmissao(NULL, app);
             break;
-        case GST_MESSAGE_STATE_CHANGED: {
-            if (GST_MESSAGE_SRC(msg) == GST_OBJECT(app->pipeline)) {
-                GstState old_s, new_s, pending_s;
-                gst_message_parse_state_changed(msg, &old_s, &new_s, &pending_s);
-                if (new_s == GST_STATE_PLAYING) {
-                    // Estado confirmado pelo GStreamer
-                }
-            }
-            break;
-        }
         default:
             break;
     }
     return TRUE;
 }
 
-// Inicia a pipeline de transmissão com os parâmetros configurados na interface
+// Inicia a pipeline de transmissão de áudio RTP/UDP
 static void iniciar_transmissao(GtkButton *btn, gpointer user_data) {
     (void)btn;
-    ServidorApp *app = (ServidorApp *)user_data;
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
     if (app->transmitindo) return;
 
     const gchar *ip = gtk_entry_get_text(GTK_ENTRY(app->entry_ip));
-    if (!ip || strlen(ip) == 0) ip = "127.0.0.1";
+    if (!ip || strlen(ip) == 0) ip = DEFAULT_IP;
     int porta = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->spin_porta));
 
-    // Recupera parâmetros de resolução
-    const gchar *res_str = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_resolucao));
-    int largura = 640, altura = 360;
-    if (res_str) {
-        if (g_str_has_prefix(res_str, "320")) { largura = 320; altura = 240; }
-        else if (g_str_has_prefix(res_str, "1280")) { largura = 1280; altura = 720; }
+    const gchar *arquivo = gtk_entry_get_text(GTK_ENTRY(app->entry_arquivo));
+    if (!arquivo || strlen(arquivo) == 0) arquivo = DEFAULT_ARQUIVO;
+
+    // Validação da existência e tamanho do arquivo
+    FILE *f = fopen(arquivo, "rb");
+    if (!f) {
+        gchar *err_txt = g_strdup_printf("<span foreground='#c62828'><b>Arquivo '%s' não encontrado!</b></span>", arquivo);
+        gtk_label_set_markup(GTK_LABEL(app->lbl_status), err_txt);
+        g_free(err_txt);
+        return;
     }
+    fseek(f, 0, SEEK_END);
+    app->tamanho_arquivo = ftell(f);
+    fclose(f);
 
-    // Recupera taxa de quadros (framerate)
-    const gchar *fps_str = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_fps));
-    int fps = (fps_str) ? atoi(fps_str) : 25;
-    if (fps <= 0) fps = 25;
-
-    // Recupera bitrate
-    const gchar *bitrate_str = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_bitrate));
-    int bitrate = (bitrate_str) ? atoi(bitrate_str) : 500;
-    if (bitrate <= 0) bitrate = 500;
-
-    // Recupera speed-preset do x264enc
-    const gchar *preset = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_preset));
-    if (!preset) preset = "ultrafast";
-
-    // Recupera padrão de teste
-    const gchar *padrao_sel = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_padrao));
-    const gchar *padrao = "ball";
-    if (padrao_sel) {
-        if (g_str_has_prefix(padrao_sel, "Barras")) padrao = "smpte";
-        else if (g_str_has_prefix(padrao_sel, "Ruído") || g_str_has_prefix(padrao_sel, "Ruido")) padrao = "snow";
-    }
-
-    // Pipeline otimizada conforme Parte 1 do roteiro (H.264 + MPEG-TS sobre UDP)
-    gchar *pipeline_desc = g_strdup_printf(
-        "videotestsrc is-live=true pattern=%s ! "
-        "video/x-raw,width=%d,height=%d,framerate=%d/1 ! "
-        "videoconvert ! "
-        "x264enc tune=zerolatency speed-preset=%s bitrate=%d key-int-max=%d ! "
-        "h264parse config-interval=-1 ! "
-        "mpegtsmux alignment=7 ! "
-        "udpsink host=%s port=%d sync=false",
-        padrao, largura, altura, fps, preset, bitrate, fps, ip, porta
-    );
-
-    GError *error = NULL;
-    app->pipeline = gst_parse_launch(pipeline_desc, &error);
-    g_free(pipeline_desc);
-
-    if (!app->pipeline || error) {
-        gchar *msg_err = g_strdup_printf("<span foreground='#c62828'><b>Erro ao criar pipeline: %s</b></span>",
-                                         error ? error->message : "Desconhecido");
-        gtk_label_set_markup(GTK_LABEL(app->lbl_status), msg_err);
-        g_free(msg_err);
-        if (error) g_error_free(error);
+    if (app->tamanho_arquivo <= 0) {
+        gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#c62828'><b>O arquivo de áudio está vazio!</b></span>");
         return;
     }
 
+    // Parâmetros de áudio configurados na interface
+    const gchar *amostragem_str = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_amostragem));
+    int rate = 44100;
+    if (amostragem_str) {
+        if (g_str_has_prefix(amostragem_str, "48000")) rate = 48000;
+        else if (g_str_has_prefix(amostragem_str, "22050")) rate = 22050;
+    }
+
+    const gchar *canais_str = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(app->combo_canais));
+    int canais = (canais_str && g_str_has_prefix(canais_str, "1")) ? 1 : 2;
+
+    // Criação dos elementos da pipeline de áudio (reutilizando arquitetura da atividade)
+    GstElement *source = gst_element_factory_make("uridecodebin", "source");
+    app->audio_convert = gst_element_factory_make("audioconvert", "convert");
+    GstElement *resample = gst_element_factory_make("audioresample", "resample");
+    GstElement *filter = gst_element_factory_make("capsfilter", "filter");
+    GstElement *payloader = gst_element_factory_make("rtpL16pay", "payloader");
+    GstElement *sink = gst_element_factory_make("udpsink", "sink");
+    app->pipeline = gst_pipeline_new("pipeline-servidor-audio");
+
+    if (!app->pipeline || !source || !app->audio_convert || !resample || !filter || !payloader || !sink) {
+        gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#c62828'><b>Falha ao criar elementos GStreamer!</b></span>");
+        if (app->pipeline) { gst_object_unref(app->pipeline); app->pipeline = NULL; }
+        return;
+    }
+
+    // Configuração do arquivo de origem via URI
+    gchar *uri = gst_filename_to_uri(arquivo, NULL);
+    g_object_set(source, "uri", uri, NULL);
+    g_free(uri);
+
+    // Caps de áudio linear PCM S16BE
+    gchar *caps_str = g_strdup_printf("audio/x-raw, format=S16BE, channels=%d, rate=%d", canais, rate);
+    GstCaps *caps = gst_caps_from_string(caps_str);
+    g_object_set(filter, "caps", caps, NULL);
+    gst_caps_unref(caps);
+    g_free(caps_str);
+
+    // Configuração de destino UDP com sincronização em tempo real
+    g_object_set(sink, "host", ip, "port", porta, "sync", TRUE, NULL);
+
+    // Montagem e ligação da pipeline
+    gst_bin_add_many(GST_BIN(app->pipeline), source, app->audio_convert, resample, filter, payloader, sink, NULL);
+    if (!gst_element_link_many(app->audio_convert, resample, filter, payloader, sink, NULL)) {
+        gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#c62828'><b>Erro ao ligar elementos da pipeline!</b></span>");
+        gst_object_unref(app->pipeline);
+        app->pipeline = NULL;
+        return;
+    }
+
+    g_signal_connect(source, "pad-added", G_CALLBACK(pad_added_handler), app);
+
+    // Barramento de mensagens
     GstBus *bus = gst_element_get_bus(app->pipeline);
     app->bus_watch_id = gst_bus_add_watch(bus, bus_callback, app);
     gst_object_unref(bus);
 
+    // Início da transmissão
     GstStateChangeReturn ret = gst_element_set_state(app->pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
-        gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#c62828'><b>Falha ao iniciar transmissão (PLAYING)</b></span>");
+        gtk_label_set_markup(GTK_LABEL(app->lbl_status), "<span foreground='#c62828'><b>Erro ao iniciar estado PLAYING!</b></span>");
         gst_element_set_state(app->pipeline, GST_STATE_NULL);
         gst_object_unref(app->pipeline);
         app->pipeline = NULL;
@@ -196,18 +275,50 @@ static void iniciar_transmissao(GtkButton *btn, gpointer user_data) {
     gtk_widget_set_sensitive(app->btn_iniciar, FALSE);
     gtk_widget_set_sensitive(app->btn_interromper, TRUE);
 
+    // Timer para atualização suave da barra de progresso (a cada 200ms)
+    app->timer_id = g_timeout_add(200, atualizar_progresso, app);
+
     gchar *status_txt = g_strdup_printf(
-        "<span foreground='#2e7d32'><b>Transmitindo para %s:%d</b> [%dx%d @ %dfps, %dkbps, %s]</span>",
-        ip, porta, largura, altura, fps, bitrate, preset
+        "<span foreground='#2e7d32'><b>Transmitindo áudio para %s:%d</b> [%d Hz, %s]</span>",
+        ip, porta, rate, (canais == 2) ? "Estéreo" : "Mono"
     );
     gtk_label_set_markup(GTK_LABEL(app->lbl_status), status_txt);
     g_free(status_txt);
 }
 
+// Diálogo para escolha do arquivo de áudio
+static void selecionar_arquivo(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
+    GtkWidget *dialog = gtk_file_chooser_dialog_new(
+        "Selecionar Arquivo de Áudio",
+        GTK_WINDOW(app->window),
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "Cancelar", GTK_RESPONSE_CANCEL,
+        "Abrir", GTK_RESPONSE_ACCEPT,
+        NULL
+    );
+
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Arquivos de Áudio (*.mp3, *.wav, *.ogg, *.flac)");
+    gtk_file_filter_add_pattern(filter, "*.mp3");
+    gtk_file_filter_add_pattern(filter, "*.wav");
+    gtk_file_filter_add_pattern(filter, "*.ogg");
+    gtk_file_filter_add_pattern(filter, "*.flac");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        gtk_entry_set_text(GTK_ENTRY(app->entry_arquivo), filename);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
 // Encerramento limpo ao fechar a janela
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     (void)widget;
-    ServidorApp *app = (ServidorApp *)user_data;
+    ServidorAudioApp *app = (ServidorAudioApp *)user_data;
     interromper_transmissao(NULL, app);
     gtk_main_quit();
 }
@@ -216,13 +327,12 @@ int main(int argc, char *argv[]) {
     gst_init(&argc, &argv);
     gtk_init(&argc, &argv);
 
-    ServidorApp app;
-    memset(&app, 0, sizeof(ServidorApp));
+    ServidorAudioApp app;
+    memset(&app, 0, sizeof(ServidorAudioApp));
 
-    // Janela principal
     app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(app.window), "Servidor Multimídia — Transmissor");
-    gtk_window_set_default_size(GTK_WINDOW(app.window), 520, 480);
+    gtk_window_set_title(GTK_WINDOW(app.window), "Servidor Multimídia — Transmissor de Áudio RTP/UDP");
+    gtk_window_set_default_size(GTK_WINDOW(app.window), 540, 480);
     gtk_window_set_position(GTK_WINDOW(app.window), GTK_WIN_POS_CENTER);
     gtk_container_set_border_width(GTK_CONTAINER(app.window), 16);
     g_signal_connect(app.window, "destroy", G_CALLBACK(on_window_destroy), &app);
@@ -230,17 +340,17 @@ int main(int argc, char *argv[]) {
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_container_add(GTK_CONTAINER(app.window), main_box);
 
-    // Cabeçalho de título
+    // Cabeçalho
     GtkWidget *lbl_header = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(lbl_header),
-        "<span size='x-large' weight='bold' foreground='#17365D'>Servidor de Transmissão de Vídeo</span>\n"
-        "<span size='small' foreground='#555555'>GStreamer MPEG-TS/UDP com Codificação H.264 em Tempo Real</span>");
+        "<span size='x-large' weight='bold' foreground='#17365D'>Servidor de Streaming de Áudio</span>\n"
+        "<span size='small' foreground='#555555'>Transmissão RTP L16 / UDP em Tempo Real</span>");
     gtk_label_set_xalign(GTK_LABEL(lbl_header), 0.0);
     gtk_box_pack_start(GTK_BOX(main_box), lbl_header, FALSE, FALSE, 0);
 
     // IP local informativo
     gchar *ip_local = obter_ips_locais();
-    gchar *lbl_ip_text = g_strdup_printf("<span size='small' foreground='#3973AC'>IP desta máquina: <b>%s</b></span>", ip_local);
+    gchar *lbl_ip_text = g_strdup_printf("<span size='small' foreground='#3973AC'>IP desta máquina (Transmissor): <b>%s</b></span>", ip_local);
     app.lbl_ip_local = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(app.lbl_ip_local), lbl_ip_text);
     gtk_label_set_xalign(GTK_LABEL(app.lbl_ip_local), 0.0);
@@ -248,10 +358,9 @@ int main(int argc, char *argv[]) {
     g_free(ip_local);
     g_free(lbl_ip_text);
 
-    // Separador
     gtk_box_pack_start(GTK_BOX(main_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 4);
 
-    // Grid para configurações de rede e qualidade
+    // Grid de configurações
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
@@ -263,85 +372,73 @@ int main(int argc, char *argv[]) {
     GtkWidget *lbl_dest_ip = gtk_label_new("IP do Receptor:");
     gtk_label_set_xalign(GTK_LABEL(lbl_dest_ip), 0.0);
     app.entry_ip = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(app.entry_ip), "127.0.0.1");
+    gtk_entry_set_text(GTK_ENTRY(app.entry_ip), DEFAULT_IP);
     gtk_entry_set_placeholder_text(GTK_ENTRY(app.entry_ip), "ex: 192.168.1.50 ou 127.0.0.1");
     gtk_grid_attach(GTK_GRID(grid), lbl_dest_ip, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.entry_ip, 1, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), app.entry_ip, 1, row, 2, 1);
     row++;
 
     // 2. Porta UDP
     GtkWidget *lbl_dest_porta = gtk_label_new("Porta UDP:");
     gtk_label_set_xalign(GTK_LABEL(lbl_dest_porta), 0.0);
     app.spin_porta = gtk_spin_button_new_with_range(1024, 65535, 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(app.spin_porta), 5000);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(app.spin_porta), DEFAULT_PORTA);
     gtk_grid_attach(GTK_GRID(grid), lbl_dest_porta, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.spin_porta, 1, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), app.spin_porta, 1, row, 2, 1);
     row++;
 
-    // 3. Resolução de Vídeo
-    GtkWidget *lbl_res = gtk_label_new("Resolução:");
-    gtk_label_set_xalign(GTK_LABEL(lbl_res), 0.0);
-    app.combo_resolucao = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_resolucao), "640x360 (Padrão)");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_resolucao), "320x240 (Baixa)");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_resolucao), "1280x720 (HD 720p)");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_resolucao), 0);
-    gtk_grid_attach(GTK_GRID(grid), lbl_res, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.combo_resolucao, 1, row, 1, 1);
+    // 3. Arquivo de áudio
+    GtkWidget *lbl_arq = gtk_label_new("Arquivo de Áudio:");
+    gtk_label_set_xalign(GTK_LABEL(lbl_arq), 0.0);
+    app.entry_arquivo = gtk_entry_new();
+    gtk_entry_set_text(GTK_ENTRY(app.entry_arquivo), DEFAULT_ARQUIVO);
+    app.btn_arquivo = gtk_button_new_with_label("Buscar...");
+    g_signal_connect(app.btn_arquivo, "clicked", G_CALLBACK(selecionar_arquivo), &app);
+
+    GtkWidget *box_arq = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_pack_start(GTK_BOX(box_arq), app.entry_arquivo, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(box_arq), app.btn_arquivo, FALSE, FALSE, 0);
+
+    gtk_grid_attach(GTK_GRID(grid), lbl_arq, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), box_arq, 1, row, 2, 1);
     row++;
 
-    // 4. Taxa de Quadros (Framerate)
-    GtkWidget *lbl_fps = gtk_label_new("Taxa de Quadros (FPS):");
-    gtk_label_set_xalign(GTK_LABEL(lbl_fps), 0.0);
-    app.combo_fps = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_fps), "25");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_fps), "15");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_fps), "30");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_fps), 0);
-    gtk_grid_attach(GTK_GRID(grid), lbl_fps, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.combo_fps, 1, row, 1, 1);
+    // 4. Taxa de Amostragem (Qualidade)
+    GtkWidget *lbl_taxa = gtk_label_new("Taxa de Amostragem:");
+    gtk_label_set_xalign(GTK_LABEL(lbl_taxa), 0.0);
+    app.combo_amostragem = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_amostragem), "44100 Hz (Qualidade CD - Padrão)");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_amostragem), "48000 Hz (Estúdio / DAT)");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_amostragem), "22050 Hz (Baixa Banda)");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_amostragem), 0);
+    gtk_grid_attach(GTK_GRID(grid), lbl_taxa, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), app.combo_amostragem, 1, row, 2, 1);
     row++;
 
-    // 5. Bitrate H.264
-    GtkWidget *lbl_bitrate = gtk_label_new("Bitrate H.264 (kbps):");
-    gtk_label_set_xalign(GTK_LABEL(lbl_bitrate), 0.0);
-    app.combo_bitrate = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_bitrate), "500");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_bitrate), "200");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_bitrate), "1500");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_bitrate), 0);
-    gtk_grid_attach(GTK_GRID(grid), lbl_bitrate, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.combo_bitrate, 1, row, 1, 1);
+    // 5. Canais de Áudio
+    GtkWidget *lbl_canais = gtk_label_new("Canais:");
+    gtk_label_set_xalign(GTK_LABEL(lbl_canais), 0.0);
+    app.combo_canais = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_canais), "2 Canais (Estéreo - Padrão)");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_canais), "1 Canal (Mono)");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_canais), 0);
+    gtk_grid_attach(GTK_GRID(grid), lbl_canais, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), app.combo_canais, 1, row, 2, 1);
     row++;
 
-    // 6. Preset de Velocidade x264 (CPU)
-    GtkWidget *lbl_preset = gtk_label_new("Velocidade do Encoder:");
-    gtk_label_set_xalign(GTK_LABEL(lbl_preset), 0.0);
-    app.combo_preset = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_preset), "ultrafast");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_preset), "fast");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_preset), "medium");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_preset), 0);
-    gtk_grid_attach(GTK_GRID(grid), lbl_preset, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.combo_preset, 1, row, 1, 1);
-    row++;
-
-    // 7. Padrão de Animação de Teste
-    GtkWidget *lbl_padrao = gtk_label_new("Padrão de Vídeo:");
-    gtk_label_set_xalign(GTK_LABEL(lbl_padrao), 0.0);
-    app.combo_padrao = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_padrao), "Bola Saltitante (ball)");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_padrao), "Barras de Cores (smpte)");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app.combo_padrao), "Ruído/Estática (snow)");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app.combo_padrao), 0);
-    gtk_grid_attach(GTK_GRID(grid), lbl_padrao, 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), app.combo_padrao, 1, row, 1, 1);
-    row++;
-
-    // Separador
     gtk_box_pack_start(GTK_BOX(main_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 4);
 
-    // Botões Iniciar e Interromper
+    // Barra de Progresso
+    GtkWidget *lbl_prog = gtk_label_new("Progresso da Transmissão (em MB):");
+    gtk_label_set_xalign(GTK_LABEL(lbl_prog), 0.0);
+    gtk_box_pack_start(GTK_BOX(main_box), lbl_prog, FALSE, FALSE, 0);
+
+    app.progress_bar = gtk_progress_bar_new();
+    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(app.progress_bar), TRUE);
+    gtk_progress_bar_set_text(GTK_PROGRESS_BAR(app.progress_bar), "0.00 MB / 0.00 MB (0%)");
+    gtk_box_pack_start(GTK_BOX(main_box), app.progress_bar, FALSE, FALSE, 2);
+
+    // Botões
     GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     app.btn_iniciar = gtk_button_new_with_label("Iniciar Transmissão");
     app.btn_interromper = gtk_button_new_with_label("Interromper");

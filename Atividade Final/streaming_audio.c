@@ -25,6 +25,7 @@ static volatile gboolean g_rodando = TRUE;
 
 static void sigint_handler(int sig)
 {
+    (void)sig;
     g_rodando = FALSE;
 }
 
@@ -38,6 +39,7 @@ typedef struct _TransmitterData
 // Conexão dinâmica do pad de áudio decodificado
 static void pad_added_handler(GstElement *src, GstPad *new_pad, TransmitterData *data)
 {
+    (void)src;
     GstPad *sink_pad = gst_element_get_static_pad(data->audio_convert, "sink");
     GstPadLinkReturn ret;
     GstCaps *new_pad_caps = NULL;
@@ -470,7 +472,7 @@ int main(int argc, char *argv[])
     // Modo interativo caso nenhum argumento seja passado
     char opcao[16];
     char buffer[128];
-    char ip[64] = DEFAULT_IP;
+    char ip[128] = DEFAULT_IP;
     int port = DEFAULT_PORTA;
     int latency = DEFAULT_LATENCIA;
 
@@ -489,7 +491,7 @@ int main(int argc, char *argv[])
             {
                 buffer[strcspn(buffer, "\r\n")] = 0;
                 if (strlen(buffer) > 0)
-                    strncpy(ip, buffer, sizeof(ip) - 1);
+                    snprintf(ip, sizeof(ip), "%s", buffer);
             }
 
             printf("Porta: ");

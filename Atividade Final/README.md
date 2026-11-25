@@ -1,87 +1,90 @@
-# Atividade Final - Streaming Multimídia com Interface Gráfica (GTK 3)
+# Atividade Final - Streaming Multimídia de Áudio com Interface Gráfica (GTK 3)
 
-Evolução do sistema de streaming multimídia em C/GStreamer com interfaces gráficas GTK 3 para o **Servidor (Transmissor)** e **Cliente (Receptor)**, permitindo transmissão e exibição de vídeo H.264 sobre MPEG-TS/UDP em tempo real, tanto em `127.0.0.1` quanto entre computadores físicos na rede local.
+Evolução do sistema de streaming multimídia em C e GStreamer desenvolvido ao longo da disciplina, implementando interfaces gráficas modernas em **GTK 3** para o **Servidor (Transmissor)** e **Cliente (Receptor)**. O sistema realiza transmissão e reprodução contínua de áudio em tempo real via **RTP L16 sobre UDP**, com controle dinâmico de jitter buffer, telemetria ao vivo e suporte tanto para `127.0.0.1` (localhost) quanto para comunicação entre dispositivos distintos na rede local.
 
 ---
 
-## Estrutura dos Arquivos
+## Estrutura do Projeto
 
-- **`servidor.c`**: Aplicação GTK 3 do transmissor. Permite configurar o IP de destino, porta UDP, resolução, taxa de quadros (FPS), bitrate H.264, preset de CPU e padrão de vídeo, com botões Iniciar/Interromper e status em tempo real.
-- **`cliente.c`**: Aplicação GTK 3 do receptor. Exibe automaticamente o IP local da máquina, porta de escuta UDP, botões Iniciar/Interromper, status da conexão e **área de vídeo incorporada diretamente na janela** (via plugin `gtksink`, com fallback para `autovideosink`).
-- **`Makefile`**: Script de compilação automatizada com flags otimizadas (`-Wall -Wextra -O2`).
-- **`streaming_audio.c`** e **`audio.mp3`**: Código da atividade anterior mantido para referência.
-- **`Atividade_Final_Streaming_GStreamer.pdf`**: Guia oficial da atividade prática.
+- **`servidor.c`**: Aplicação gráfica GTK 3 do transmissor de áudio:
+  - Configuração do **IP de destino** e **Porta UDP**.
+  - Seleção do arquivo de áudio (`audio.mp3` padrão ou navegador via `GtkFileChooserDialog`).
+  - Parâmetros de qualidade configuráveis: **Taxa de amostragem** (44.1 kHz, 48 kHz, 22.05 kHz) e **Canais** (Estéreo / Mono).
+  - **Barra de progresso** em tempo real com volume transmitido em Megabytes (`MB / Total MB`) e porcentagem (`%`).
+  - Pipeline: `uridecodebin -> audioconvert -> audioresample -> capsfilter (audio/x-raw S16BE) -> rtpL16pay -> udpsink`.
+- **`cliente.c`**: Aplicação gráfica GTK 3 do receptor de áudio:
+  - Exibição automática do **IP local** da máquina receptora para facilitar o preenchimento no servidor.
+  - Seleção da **Porta UDP** de escuta e **Latência do Jitter Buffer** (50 ms, 100 ms, 200 ms, 400 ms).
+  - Parâmetros de recepção compatíveis (taxa de amostragem e canais).
+  - **Painel de Telemetria ao Vivo**: monitoramento em tempo real de pacotes recebidos (`num-pushed`), perdidos (`num-lost`), atrasados (`num-late`), duplicados e jitter médio calculado (`avg-jitter`).
+  - Barra pulsante de atividade sonora e saída direta de som no alto-falante (`alsasink` / `pulsesink` / `autoaudiosink`).
+  - Geração automática de relatório consolidado em arquivo (`log_receptor_<latencia>ms.txt` e `log_receptor.txt`) ao finalizar ou interromper.
+- **`streaming_audio.c`**: Aplicação em modo texto (CLI) desenvolvida nas aulas anteriores, mantida para compatibilidade e testes via terminal.
+- **`audio.mp3`**: Arquivo de áudio para testes práticos de streaming.
+- **`Makefile`**: Script de compilação automatizada com flags rigorosas (`-Wall -Wextra -O2`).
+- **`Atividade_Final_Streaming_GStreamer.pdf`**: Roteiro oficial da atividade.
 
 ---
 
 ## Dependências
 
-No Ubuntu/Debian:
+### Ubuntu / Debian / Linux Mint:
 ```bash
 sudo apt update
-sudo apt install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gtk3
+sudo apt install -y build-essential pkg-config libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa gstreamer1.0-pulseaudio
 ```
 
-No Fedora:
+### Fedora:
 ```bash
-sudo dnf install -y gtk3-devel gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free gstreamer1-libav
+sudo dnf install -y gcc make pkgconf-pkg-config gtk3-devel gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free gstreamer1-libav
 ```
 
 ---
 
 ## Compilação
 
-Para compilar ambos os programas simultaneamente:
+Para compilar todos os programas (`servidor`, `cliente` e `streaming_audio`):
 ```bash
 make
 ```
 
-Ou compilar manualmente via GCC:
+Para limpar os binários gerados:
 ```bash
-# Compilar o Servidor (Transmissor):
-gcc -Wall -Wextra -O2 servidor.c -o servidor $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0)
-
-# Compilar o Cliente (Receptor):
-gcc -Wall -Wextra -O2 cliente.c -o cliente $(pkg-config --cflags --libs gtk+-3.0 gstreamer-1.0 gstreamer-video-1.0)
+make clean
 ```
 
 ---
 
-## Execução
+## Instruções de Execução
 
-### 1. No Computador Receptor (Dispositivo B - Iniciar Primeiro)
-
+### 1. Iniciar o Receptor (Cliente)
+Inicie primeiro o cliente para que a porta UDP esteja aberta e aguardando os pacotes RTP:
 ```bash
 ./cliente
 ```
-1. A janela exibirá no topo o **IP desta máquina** (ex: `192.168.1.150`).
-2. Confirme a porta UDP (padrão: `5000`).
-3. Clique em **"Iniciar Recepção"**.
-4. O status mudará para *Aguardando transmissão na porta UDP 5000...*. Quando o servidor começar a transmitir, o vídeo aparecerá reproduzido diretamente na área de exibição da janela.
+1. Observe a linha em destaque verde: **"Seu IP para o transmissor: <IP_LOCAL>"**.
+2. Mantenha a porta UDP padrão `5000` (ou altere se necessário).
+3. Selecione a latência desejada para o Jitter Buffer (padrão: `200 ms`).
+4. Clique em **"Iniciar Recepção"**.
+5. O status passará para *Aguardando áudio na porta UDP 5000...*.
 
----
-
-### 2. No Computador Transmissor (Dispositivo A)
-
+### 2. Iniciar o Transmissor (Servidor)
+No computador transmissor (ou em outro terminal na mesma máquina):
 ```bash
 ./servidor
 ```
-1. No campo **IP do Receptor**, informe o IP exibido na janela do Cliente (ou `127.0.0.1` para teste no mesmo computador).
-2. Ajuste a **Porta UDP** para a mesma configurada no cliente (`5000`).
-3. Selecione os **Parâmetros de Qualidade**:
-   - **Resolução**: `640x360` (padrão), `320x240` (menor largura de banda) ou `1280x720` (alta definição).
-   - **Taxa de Quadros (FPS)**: `15`, `25` ou `30` fps.
-   - **Bitrate H.264**: `200`, `500` ou `1500` kbps.
-   - **Velocidade do Encoder (CPU)**: `ultrafast` (menor latência/CPU), `fast` ou `medium`.
-   - **Padrão de Vídeo**: Bola Saltitante (`ball`), Barras de Cores (`smpte`) ou Ruído (`snow`).
+1. No campo **IP do Receptor**, informe o IP exibido pelo cliente (use `127.0.0.1` se estiver testando no mesmo computador).
+2. Verifique se a **Porta UDP** é a mesma (`5000`).
+3. O arquivo padrão `audio.mp3` já virá selecionado (é possível escolher outro arquivo de áudio clicando em "Selecionar...").
 4. Clique em **"Iniciar Transmissão"**.
-5. O status ficará verde indicando *Transmitindo para <IP>:<Porta>*.
+5. A barra de progresso acompanhará em tempo real os megabytes transmitidos e o áudio começará a tocar imediatamente nos alto-falantes do cliente.
+6. As estatísticas de pacotes e jitter médio serão atualizadas dinamicamente no painel do cliente.
 
 ---
 
-## Destaques da Implementação
+## Destaques Técnicos
 
-1. **Loop de Eventos Não Bloqueante**: A comunicação com as pipelines do GStreamer utiliza `gst_bus_add_watch()` associado ao loop principal da GLib (`g_main_loop`), garantindo que a interface gráfica GTK nunca trave ou congele.
-2. **Reprodução Integrada (`gtksink`)**: O cliente utiliza o sink oficial do GTK para incorporar os frames de vídeo renderizados diretamente em um container `GtkFrame`, eliminando a necessidade de janelas externas separadas.
-3. **Pipeline Otimizada**: Conforme investigado na Parte 1, o codificador `x264enc` utiliza `tune=zerolatency` e `key-int-max=FPS`, `h264parse config-interval=-1`, `mpegtsmux alignment=7` e `udpsink sync=false` para garantir fluidez máxima e latência mínima pela rede.
-4. **Gerenciamento de Recursos**: Ao clicar em "Interromper" ou fechar a janela, as pipelines são levadas com segurança para o estado `GST_STATE_NULL` e devidamente liberadas da memória.
+1. **Loop de Eventos Não-Bloqueante**: Ambas as aplicações utilizam `gst_bus_add_watch()` e `g_timeout_add()` integrados ao `gtk_main()`, garantindo interfaces gráficas fluidas, responsivas e sem congelamento durante o streaming.
+2. **Robustez de Áudio no Linux**: A criação do elemento de saída sonoro testa iterativamente drivers de áudio (`alsasink`, `pulsesink`, `autoaudiosink`), contornando problemas de deadlock comuns em servidores PipeWire.
+3. **Resiliência a Jitter de Rede**: O elemento `rtpjitterbuffer` reordena pacotes que chegam fora de ordem e absorve variações de tempo de trânsito da rede, registrando métricas precisas para análise de desempenho.
+4. **Encerramento Limpo**: Liberação adequada de todos os recursos de pipeline com `GST_STATE_NULL`, desconexão de watches de bus e remoção de timers do GLib ao interromper ou fechar a janela.
