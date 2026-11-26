@@ -334,6 +334,7 @@ int main(int argc, char *argv[]) {
     gtk_window_set_title(GTK_WINDOW(app.window), "Servidor Multimídia — Transmissor de Áudio RTP/UDP");
     gtk_window_set_default_size(GTK_WINDOW(app.window), 540, 480);
     gtk_window_set_position(GTK_WINDOW(app.window), GTK_WIN_POS_CENTER);
+    gtk_window_set_keep_above(GTK_WINDOW(app.window), TRUE);
     gtk_container_set_border_width(GTK_CONTAINER(app.window), 16);
     g_signal_connect(app.window, "destroy", G_CALLBACK(on_window_destroy), &app);
 
@@ -456,7 +457,23 @@ int main(int argc, char *argv[]) {
     gtk_label_set_markup(GTK_LABEL(app.lbl_status), "<span foreground='#555555'>Status: <b>Parado</b></span>");
     gtk_box_pack_start(GTK_BOX(main_box), app.lbl_status, FALSE, FALSE, 4);
 
+    gboolean autostart = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--autostart") == 0 || strcmp(argv[i], "-a") == 0) {
+            autostart = TRUE;
+        } else if (strncmp(argv[i], "--ip=", 5) == 0) {
+            gtk_entry_set_text(GTK_ENTRY(app.entry_ip), argv[i] + 5);
+        } else if (argv[i][0] != '-') {
+            gtk_entry_set_text(GTK_ENTRY(app.entry_ip), argv[i]);
+        }
+    }
+
     gtk_widget_show_all(app.window);
+
+    if (autostart) {
+        iniciar_transmissao(NULL, &app);
+    }
+
     gtk_main();
 
     return 0;

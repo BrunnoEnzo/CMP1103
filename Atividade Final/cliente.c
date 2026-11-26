@@ -375,6 +375,7 @@ int main(int argc, char *argv[]) {
     gtk_window_set_title(GTK_WINDOW(app.window), "Cliente Multimídia — Receptor de Áudio RTP/UDP");
     gtk_window_set_default_size(GTK_WINDOW(app.window), 540, 520);
     gtk_window_set_position(GTK_WINDOW(app.window), GTK_WIN_POS_CENTER);
+    gtk_window_set_keep_above(GTK_WINDOW(app.window), TRUE);
     gtk_container_set_border_width(GTK_CONTAINER(app.window), 16);
     g_signal_connect(app.window, "destroy", G_CALLBACK(on_window_destroy), &app);
 
@@ -539,7 +540,19 @@ int main(int argc, char *argv[]) {
     g_signal_connect(app.btn_interromper, "clicked", G_CALLBACK(interromper_recepcao), &app);
     gtk_box_pack_start(GTK_BOX(box_botoes), app.btn_interromper, TRUE, TRUE, 0);
 
+    gboolean autostart = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--autostart") == 0 || strcmp(argv[i], "-a") == 0) {
+            autostart = TRUE;
+        }
+    }
+
     gtk_widget_show_all(app.window);
+
+    if (autostart) {
+        iniciar_recepcao(NULL, &app);
+    }
+
     gtk_main();
 
     return 0;
